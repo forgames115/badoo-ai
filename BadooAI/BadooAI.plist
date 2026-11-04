@@ -4,9 +4,15 @@
 <dict>
 	<key>Filter</key>
 	<dict>
+		<key>Mode</key>
+		<string>Any</string>
 		<key>Bundles</key>
 		<array>
-			<string>com.badoo.mobile</string>
+			<string>com.badoo.Badoo</string>
+		</array>
+		<key>Executables</key>
+		<array>
+			<string>Badoo</string>
 		</array>
 	</dict>
 </dict>
