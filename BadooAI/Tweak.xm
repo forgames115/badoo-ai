@@ -178,7 +178,8 @@ static NSString *ba_findFile(NSString *base, NSString *needle, int depth) {
 }
 - (NSArray*)messagesAfterRowid:(long long)rid limit:(NSInteger)lim {
     sqlite3 *db = [self openRO]; if (!db) return @[];
-    NSString *sql = [NSString stringWithFormat:@"SELECT rowid, %@, %@, %@, %@ FROM message WHERE rowid>%lld ORDER BY rowid ASC LIMIT %ld", self.colText?:@"''", self.colTime?:@"0", self.colConv?:@"''", self.colDir?:@"1", rid, (long)lim];
+    NSString *sql = [NSString stringWithFormat:@"SELECT rowid, %@, %@, %@, %@ FROM message WHERE rowid>%lld ORDER BY rowid ASC LIMIT %ld", 
+        self.colText?:@"''", self.colTime?:@"0", self.colConv?:@"''", self.colDir?:@"0", rid, (long)lim];
     sqlite3_stmt *st = NULL; NSMutableArray *out = [NSMutableArray array];
     if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) == SQLITE_OK) {
         while (sqlite3_step(st) == SQLITE_ROW) {
@@ -187,7 +188,7 @@ static NSString *ba_findFile(NSString *base, NSString *needle, int depth) {
             m.text = [self txt:st idx:1] ?: @"";
             m.timestamp = [self normTime:sqlite3_column_int64(st, 2)];
             m.contactKey = [self txt:st idx:3] ?: @"unknown";
-            m.incoming = [self incoming:st dir:3];
+            m.incoming = [self incoming:st dir:4]; // BUG 1 FIXED: colDir is index 4
             if (m.text.length) [out addObject:m];
         }
     }
@@ -196,7 +197,8 @@ static NSString *ba_findFile(NSString *base, NSString *needle, int depth) {
 }
 - (NSArray*)historyForContact:(NSString*)key limit:(NSInteger)lim {
     sqlite3 *db = [self openRO]; if (!db) return @[];
-    NSString *sql = [NSString stringWithFormat:@"SELECT %@, %@, %@ FROM message WHERE %@=? ORDER BY rowid DESC LIMIT %ld", self.colText?:@"''", self.colTime?:@"0", self.colDir?:@"1", self.colConv?:@"''", (long)lim];
+    NSString *sql = [NSString stringWithFormat:@"SELECT %@, %@, %@ FROM message WHERE %@=? ORDER BY rowid DESC LIMIT %ld", 
+        self.colText?:@"''", self.colTime?:@"0", self.colDir?:@"0", self.colConv?:@"''", (long)lim];
     sqlite3_stmt *st = NULL; NSMutableArray *out = [NSMutableArray array];
     if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, key.UTF8String, -1, SQLITE_TRANSIENT);
@@ -348,13 +350,15 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
 @implementation BAUI
 + (instancetype)shared { static BAUI *s=nil; static dispatch_once_t once; dispatch_once(&once,^{ s=[BAUI new]; }); return s; }
 - (UIViewController*)topVC {
-    UIWindow *kw=nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene*)s).windows)
-            if (w.isKeyWindow && w != BAHUDWindow()) { kw=w; break; }
-        if (kw) break;
-    }
+    __block UIWindow *kw=nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene*)s).windows)
+                if (w.isKeyWindow && w != BAHUDWindow()) { kw=w; break; }
+            if (kw) break;
+        }
+    });
     UIViewController *vc = kw.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     if ([vc isKindOfClass:[UINavigationController class]]) vc = ((UINavigationController*)vc).topViewController;
@@ -376,10 +380,14 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                     UITableViewCell *c=[tv cellForRowAtIndexPath:ip];
                     if (c && ba_nameMatch(c, needle, 0, nil)) {
                         BAHUDLog(@"UI: Found chat cell for %@", needle);
-                        [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionMiddle];
-                        id<UITableViewDelegate> d=tv.delegate;
-                        if ([d respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)])
-                            [d tableView:tv didSelectRowAtIndexPath:ip];
+                        __block UITableView *bTv = tv;
+                        __block NSIndexPath *bIp = ip;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [bTv selectRowAtIndexPath:bIp animated:NO scrollPosition:UITableViewScrollPositionMiddle];
+                            id<UITableViewDelegate> d=bTv.delegate;
+                            if ([d respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)])
+                                [d tableView:bTv didSelectRowAtIndexPath:bIp];
+                        });
                         return YES;
                     }
                 }
@@ -391,10 +399,14 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                     UICollectionViewCell *c=[cv cellForItemAtIndexPath:ip];
                     if (c && ba_nameMatch(c, needle, 0, nil)) {
                         BAHUDLog(@"UI: Found chat cell for %@", needle);
-                        [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionCenteredVertically];
-                        id<UICollectionViewDelegate> d=cv.delegate;
-                        if ([d respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)])
-                            [d collectionView:cv didSelectItemAtIndexPath:ip];
+                        __block UICollectionView *bCv = cv;
+                        __block NSIndexPath *bIp = ip;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [bCv selectItemAtIndexPath:bIp animated:NO scrollPosition:UICollectionViewScrollPositionCenteredVertically];
+                            id<UICollectionViewDelegate> d=bCv.delegate;
+                            if ([d respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)])
+                                [d collectionView:bCv didSelectItemAtIndexPath:bIp];
+                        });
                         return YES;
                     }
                 }
@@ -407,10 +419,17 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
 }
 - (BOOL)typeAndSend:(NSString*)text {
     if (!text.length) return NO;
-    UIViewController *vc = [self topVC];
-    UITextView *input = ba_findInput(vc.view);
+    
+    __block UITextView *input = nil;
+    __block CGRect ir = CGRectZero;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        UIViewController *vc = [self topVC];
+        input = ba_findInput(vc.view);
+        if (input) ir = [input convertRect:input.bounds toView:nil];
+    });
+    
     if (!input) { BAHUDLog(@"UI: Input box not found."); return NO; }
-    CGRect ir = [input convertRect:input.bounds toView:nil];
+    
     dispatch_async(dispatch_get_main_queue(), ^{
         input.text = @"";
         [input becomeFirstResponder];
@@ -430,7 +449,13 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
         [NSThread sleepForTimeInterval:p/1000.0];
     }
     [NSThread sleepForTimeInterval:0.3];
-    UIButton *s = ba_findSend(vc.view, ir.origin.y);
+    
+    __block UIButton *s = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        UIViewController *vc = [self topVC];
+        s = ba_findSend(vc.view, ir.origin.y);
+    });
+    
     if (!s) { BAHUDLog(@"UI: Send button not found."); return NO; }
     BAHUDLog(@"UI: Sending text now.");
     dispatch_async(dispatch_get_main_queue(), ^{ [s sendActionsForControlEvents:UIControlEventTouchUpInside]; });
@@ -503,7 +528,11 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
     for (BAMessage *m in fresh) {
         if (m.rowid>_lastRowid) _lastRowid=m.rowid;
         if (!m.incoming) continue;
-        if ([_sent containsObject:m.text]) continue;
+        
+        // BUG 3 FIXED: composite key for deduplication
+        NSString *sentKey = [NSString stringWithFormat:@"%@|%@", m.contactKey, m.text];
+        if ([_sent containsObject:sentKey]) continue;
+        
         if ([_pausedUntil[m.contactKey] doubleValue] > [NSDate date].timeIntervalSince1970) continue;
         BOOL dup=NO;
         for (BAMessage *q in _queue) if ([q.contactKey isEqualToString:m.contactKey]) { dup=YES; break; }
@@ -566,7 +595,11 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                         NSUInteger ms=cfg.typingMin + arc4random_uniform((uint32_t)MAX(1, cfg.typingMax-cfg.typingMin+1));
                         double base=MIN(9.0, MAX(1.5, vl.length*(ms/1000.0)/5.0));
                         [NSThread sleepForTimeInterval:base];
-                        [strongSelf->_sent addObject:vl];
+                        
+                        // BUG 3 FIXED: composite key on send
+                        NSString *sentKey = [NSString stringWithFormat:@"%@|%@", job.contactKey, vl];
+                        [strongSelf->_sent addObject:sentKey];
+                        
                         [[BAUI shared] typeAndSend:vl];
                         [NSThread sleepForTimeInterval:1.2 + arc4random_uniform(2000)/1000.0];
                     }
@@ -576,7 +609,9 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                 done=YES;
             }
         }];
-        NSDate *dl=[NSDate dateWithTimeIntervalSinceNow:60];
+        
+        // BUG 6 FIXED: 180s timeout instead of 60s
+        NSDate *dl=[NSDate dateWithTimeIntervalSinceNow:180]; 
         while (!done && [dl timeIntervalSinceNow]>0) [NSThread sleepForTimeInterval:0.1];
         self->_cooldowns[job.contactKey]=[NSDate dateWithTimeIntervalSinceNow:cfg.contactCooldown];
         [_inflight removeObject:job.contactKey];
@@ -661,7 +696,9 @@ void BAHUDInstall(void) {
         gHUDLabel.layer.masksToBounds = YES;
         gHUDLabel.userInteractionEnabled = YES;
         gHUDLabel.center = CGPointMake(UIScreen.mainScreen.bounds.size.width-90, 120);
-        [gHUDWindow addSubview:gHUDLabel];
+        
+        // BUG 5 FIXED: adding to rootViewController.view, not window directly
+        [gHUDWindow.rootViewController.view addSubview:gHUDLabel];
         
         class_addMethod([UILabel class], NSSelectorFromString(@"ba_tap"),
             imp_implementationWithBlock(^(UILabel *v){ [[BAEngine shared] setPaused:![BAEngine shared].paused]; }), "v@:");
