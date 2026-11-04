@@ -8,7 +8,7 @@ jobs:
       - uses: Randomblock1/theos-action@v1
         with:
           theos-src: https://github.com/theos/theos.git
-          theos-sdks: https://github.com/theos/sdks.git
+          theos-sdks: https://github.com/theos/sdks
       - run: cd BadooAI && make clean package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 -j4
       - uses: actions/upload-artifact@v4
         with:
