@@ -1,0 +1,9 @@
+Package: com.he.badooai
+Name: Badoo AI
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Auto-chat for Badoo powered by CapitalAI
+Maintainer: He
+Author: He
+Section: Tweaks
+Depends: mobilesubstrate
