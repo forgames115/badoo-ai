@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <sqlite3.h>
 #import <stdarg.h>
+#import <stdlib.h>
 
 void BAHUDLog(NSString *fmt, ...);
 void BAHUDRefresh(void);
@@ -522,22 +523,28 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
         __weak typeof(self) weakSelf=self;
         [[BACapitalAI shared] replyForContact:job.contactKey name:job.contactName?:@"" history:hist completion:^(NSArray<NSDictionary*>*content, NSDictionary*flags) {
             @autoreleasepool {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) { done=YES; return; }
+                
                 if ([flags[@"underage"] boolValue] || [flags[@"ignored"] boolValue] || [flags[@"internalAccount"] boolValue] || [flags[@"tierFiltered"] boolValue] || [flags[@"genderFiltered"] boolValue] || [flags[@"ppvExhausted"] boolValue]) {
-                    [weakSelf pauseC:job.contactKey s:86400]; done=YES; return;
+                    [strongSelf pauseC:job.contactKey s:86400]; done=YES; return;
                 }
-                if ([flags[@"aiCreditOver"] boolValue]) { [weakSelf setPaused:YES]; done=YES; return; }
-                if ([flags[@"converted"] boolValue]) { [weakSelf pauseC:job.contactKey s:3600]; done=YES; return; }
+                if ([flags[@"aiCreditOver"] boolValue]) { [strongSelf setPaused:YES]; done=YES; return; }
+                if ([flags[@"converted"] boolValue]) { [strongSelf pauseC:job.contactKey s:3600]; done=YES; return; }
                 if (!content.count) { done=YES; return; }
+                
                 if (cfg.dryRun) {
                     NSMutableString *pv=[NSMutableString string];
                     for (NSDictionary *p in content) [pv appendFormat:@"[%@] %@\n", p[@"type"], p[@"content"]];
                     BAHUDLog(@"DRY: %@", pv);
                     done=YES; return;
                 }
+                
                 if (![[BAUI shared] openChat:job.contactName ident:job.contactKey]) {
                     BAHUDLog(@"open failed %@", job.contactKey);
-                    [weakSelf pauseC:job.contactKey s:300]; done=YES; return;
+                    [strongSelf pauseC:job.contactKey s:300]; done=YES; return;
                 }
+                
                 [NSThread sleepForTimeInterval:1.0];
                 for (NSDictionary *p in content) {
                     NSString *ty=p[@"type"], *vl=p[@"content"];
@@ -545,7 +552,7 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                         NSUInteger ms=cfg.typingMin + arc4random_uniform((uint32_t)MAX(1, cfg.typingMax-cfg.typingMin+1));
                         double base=MIN(9.0, MAX(1.5, vl.length*(ms/1000.0)/5.0));
                         [NSThread sleepForTimeInterval:base];
-                        [weakSelf->_sent addObject:vl];
+                        [strongSelf->_sent addObject:vl];
                         [[BAUI shared] typeAndSend:vl];
                         [NSThread sleepForTimeInterval:1.2 + arc4random_uniform(2000)/1000.0];
                     }
