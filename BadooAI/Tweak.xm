@@ -111,7 +111,7 @@ static NSString *ba_findFile(NSString *base, NSString *needle, int depth) {
         NSString *f = ba_findFile(p, @"ChatCom", 4);
         if (f) { self.dbPath = f; break; }
     }
-    BAHUDLog(@"db: %@", self.dbPath.lastPathComponent ?: @"NOT FOUND");
+    BAHUDLog(@"DB Locate: %@", self.dbPath ?: @"NOT FOUND");
     [self introspect];
 }
 - (void)introspect {
@@ -137,7 +137,7 @@ static NSString *ba_findFile(NSString *base, NSString *needle, int depth) {
     for (NSString *w in @[@"is_incoming",@"incoming",@"direction"])
         for (NSString *h in c) if ([h.lowercaseString isEqualToString:w]) { if (!self.colDir) self.colDir = h; }
     sqlite3_close(db);
-    BAHUDLog(@"cols text=%@ conv=%@ dir=%@", self.colText, self.colConv, self.colDir);
+    BAHUDLog(@"DB Cols: text=%@ conv=%@ dir=%@", self.colText, self.colConv, self.colDir);
 }
 - (sqlite3*)openRO {
     if (!self.dbPath) return NULL;
@@ -226,7 +226,10 @@ typedef void (^BAReplyBlock)(NSArray<NSDictionary*> *content, NSDictionary *flag
 + (instancetype)shared { static BACapitalAI *s=nil; static dispatch_once_t once; dispatch_once(&once,^{ s=[BACapitalAI new]; }); return s; }
 - (void)replyForContact:(NSString*)k name:(NSString*)n history:(NSArray<BAMessage*>*)h completion:(BAReplyBlock)c {
     BAConfig *cfg = [BAConfig shared];
-    if (!cfg.licenseKey.length) { c(@[], @{@"error":@"no_key"}); return; }
+    if (!cfg.licenseKey.length) { BAHUDLog(@"No license key"); c(@[], @{@"error":@"no_key"}); return; }
+    
+    BAHUDLog(@"Sending to CapitalAI for %@", k);
+    
     NSMutableArray *ch = [NSMutableArray array];
     for (BAMessage *m in h) {
         [ch addObject:@{@"role": m.incoming?@"user":@"assistant", @"content": m.text, @"timestamp": @(m.timestamp)}];
@@ -255,9 +258,10 @@ typedef void (^BAReplyBlock)(NSArray<NSDictionary*> *content, NSDictionary *flag
     r.timeoutInterval = 45;
 
     [[NSURLSession.sharedSession dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *rp, NSError *e) {
-        if (e || !d) { c(@[], @{@"error": e.localizedDescription?:@"net"}); return; }
+        if (e || !d) { BAHUDLog(@"API Error: %@", e.localizedDescription); c(@[], @{@"error": e.localizedDescription?:@"net"}); return; }
         NSDictionary *root = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        if (![root isKindOfClass:[NSDictionary class]]) { c(@[], @{@"error":@"json"}); return; }
+        if (![root isKindOfClass:[NSDictionary class]]) { BAHUDLog(@"API JSON Error"); c(@[], @{@"error":@"json"}); return; }
+        
         NSMutableDictionary *f = [NSMutableDictionary dictionary];
         for (NSString *kk in @[@"converted",@"underage",@"timewaste",@"tierFiltered",@"genderFiltered",@"aiCreditOver",@"messagedAlready",@"internalAccount",@"ignored",@"ppvExhausted",@"chatCooldown",@"sellingMode",@"chatCooldownUntil"])
             if (root[kk]) f[kk] = root[kk];
@@ -267,6 +271,8 @@ typedef void (^BAReplyBlock)(NSArray<NSDictionary*> *content, NSDictionary *flag
         NSMutableArray *clean = [NSMutableArray array];
         for (id it in content)
             if ([it isKindOfClass:[NSDictionary class]] && it[@"type"] && it[@"content"]) [clean addObject:it];
+            
+        BAHUDLog(@"API Returned %lu items", (unsigned long)clean.count);
         c(clean, f);
     }] resume];
 }
@@ -359,7 +365,7 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
     UIViewController *vc = [self topVC];
     UITableView *tv = ba_findTV(vc.view);
     UICollectionView *cv = ba_findCV(vc.view);
-    if (!tv && !cv) return NO;
+    if (!tv && !cv) { BAHUDLog(@"UI: No list view found to open chat."); return NO; }
     NSString *needle = name.length>=2 ? name : ident;
     if (needle.length<2) return NO;
     for (int pg=0; pg<6; pg++) {
@@ -369,6 +375,7 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                     NSIndexPath *ip=[NSIndexPath indexPathForRow:r inSection:s];
                     UITableViewCell *c=[tv cellForRowAtIndexPath:ip];
                     if (c && ba_nameMatch(c, needle, 0, nil)) {
+                        BAHUDLog(@"UI: Found chat cell for %@", needle);
                         [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionMiddle];
                         id<UITableViewDelegate> d=tv.delegate;
                         if ([d respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)])
@@ -383,6 +390,7 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                     NSIndexPath *ip=[NSIndexPath indexPathForItem:i inSection:s];
                     UICollectionViewCell *c=[cv cellForItemAtIndexPath:ip];
                     if (c && ba_nameMatch(c, needle, 0, nil)) {
+                        BAHUDLog(@"UI: Found chat cell for %@", needle);
                         [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionCenteredVertically];
                         id<UICollectionViewDelegate> d=cv.delegate;
                         if ([d respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)])
@@ -394,13 +402,14 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
         }
         [NSThread sleepForTimeInterval:0.25];
     }
+    BAHUDLog(@"UI: Chat cell not found for %@", needle);
     return NO;
 }
 - (BOOL)typeAndSend:(NSString*)text {
     if (!text.length) return NO;
     UIViewController *vc = [self topVC];
     UITextView *input = ba_findInput(vc.view);
-    if (!input) return NO;
+    if (!input) { BAHUDLog(@"UI: Input box not found."); return NO; }
     CGRect ir = [input convertRect:input.bounds toView:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
         input.text = @"";
@@ -422,7 +431,8 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
     }
     [NSThread sleepForTimeInterval:0.3];
     UIButton *s = ba_findSend(vc.view, ir.origin.y);
-    if (!s) return NO;
+    if (!s) { BAHUDLog(@"UI: Send button not found."); return NO; }
+    BAHUDLog(@"UI: Sending text now.");
     dispatch_async(dispatch_get_main_queue(), ^{ [s sendActionsForControlEvents:UIControlEventTouchUpInside]; });
     [NSThread sleepForTimeInterval:0.5];
     return YES;
@@ -470,7 +480,7 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
 }
 - (void)start {
     _lastRowid = [[BADatabase shared] maxRowid];
-    BAHUDLog(@"engine start rid=%lld", _lastRowid);
+    BAHUDLog(@"Engine started. Last RowID: %lld", _lastRowid);
     __weak typeof(self) w=self;
     dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
     dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW,0),(uint64_t)(MAX(2,[BAConfig shared].pollInterval)*NSEC_PER_SEC), 1*NSEC_PER_SEC);
@@ -487,6 +497,9 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
     if (!cfg.enabled || ![cfg isActiveHour]) return;
     NSArray *fresh=[[BADatabase shared] messagesAfterRowid:_lastRowid limit:50];
     if (!fresh.count) return;
+    
+    BAHUDLog(@"Engine: Found %lu new messages", (unsigned long)fresh.count);
+    
     for (BAMessage *m in fresh) {
         if (m.rowid>_lastRowid) _lastRowid=m.rowid;
         if (!m.incoming) continue;
@@ -527,21 +540,22 @@ static UIButton *ba_findSend(UIView *r, CGFloat inputY) {
                 if (!strongSelf) { done=YES; return; }
                 
                 if ([flags[@"underage"] boolValue] || [flags[@"ignored"] boolValue] || [flags[@"internalAccount"] boolValue] || [flags[@"tierFiltered"] boolValue] || [flags[@"genderFiltered"] boolValue] || [flags[@"ppvExhausted"] boolValue]) {
+                    BAHUDLog(@"Engine: Filter triggered. Pausing.");
                     [strongSelf pauseC:job.contactKey s:86400]; done=YES; return;
                 }
-                if ([flags[@"aiCreditOver"] boolValue]) { [strongSelf setPaused:YES]; done=YES; return; }
-                if ([flags[@"converted"] boolValue]) { [strongSelf pauseC:job.contactKey s:3600]; done=YES; return; }
-                if (!content.count) { done=YES; return; }
+                if ([flags[@"aiCreditOver"] boolValue]) { BAHUDLog(@"Engine: AI Credits Over!"); [strongSelf setPaused:YES]; done=YES; return; }
+                if ([flags[@"converted"] boolValue]) { BAHUDLog(@"Engine: Already converted."); [strongSelf pauseC:job.contactKey s:3600]; done=YES; return; }
+                if (!content.count) { BAHUDLog(@"Engine: No content returned."); done=YES; return; }
                 
                 if (cfg.dryRun) {
                     NSMutableString *pv=[NSMutableString string];
                     for (NSDictionary *p in content) [pv appendFormat:@"[%@] %@\n", p[@"type"], p[@"content"]];
-                    BAHUDLog(@"DRY: %@", pv);
+                    BAHUDLog(@"DRY RUN OUTPUT:\n%@", pv);
                     done=YES; return;
                 }
                 
                 if (![[BAUI shared] openChat:job.contactName ident:job.contactKey]) {
-                    BAHUDLog(@"open failed %@", job.contactKey);
+                    BAHUDLog(@"Engine: Open failed %@", job.contactKey);
                     [strongSelf pauseC:job.contactKey s:300]; done=YES; return;
                 }
                 
@@ -584,7 +598,14 @@ void BAHUDLog(NSString *fmt, ...) {
     NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSLog(@"[BadooAI] %@", m);
+    
+    NSString *logPath = @"/var/mobile/Documents/badoo_ai_debug.log";
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], m];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (!fh) { [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+    else { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
 }
+
 void BAHUDRefresh(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!gHUDLabel) return;
@@ -600,18 +621,38 @@ void BAHUDRefresh(void) {
 - (void)viewDidLoad { [super viewDidLoad]; self.view.backgroundColor = UIColor.clearColor; }
 @end
 void BAHUDInstall(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    BAHUDLog(@"BAHUDInstall called");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gHUDWindow) return;
         UIWindowScene *sc = nil;
-        for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-            if ([s isKindOfClass:[UIWindowScene class]]) { sc=(UIWindowScene*)s; break; }
-        gHUDWindow = sc ? [[UIWindow alloc] initWithWindowScene:sc] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]] && s.activationState == UISceneActivationStateForegroundActive) {
+                sc = (UIWindowScene *)s;
+                break;
+            }
+        }
+        if (!sc) {
+            BAHUDLog(@"No foreground UIWindowScene found! Trying fallback.");
+            for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+                if ([s isKindOfClass:[UIWindowScene class]]) {
+                    sc = (UIWindowScene *)s;
+                    break;
+                }
+            }
+        }
+        if (!sc) {
+            BAHUDLog(@"Still no UIWindowScene. Cannot show HUD.");
+            return;
+        }
+        
+        gHUDWindow = [[UIWindow alloc] initWithWindowScene:sc];
         gHUDWindow.windowLevel = UIWindowLevelAlert + 101;
         gHUDWindow.backgroundColor = UIColor.clearColor;
         gHUDWindow.rootViewController = [BA_HUDVC new];
         gHUDWindow.hidden = NO;
+        
         gHUDLabel = [[UILabel alloc] initWithFrame:CGRectMake(0,0,150,32)];
-        gHUDLabel.text = @"AI: idle";
+        gHUDLabel.text = @"AI: boot";
         gHUDLabel.textAlignment = NSTextAlignmentCenter;
         gHUDLabel.font = [UIFont boldSystemFontOfSize:10];
         gHUDLabel.textColor = UIColor.whiteColor;
@@ -621,18 +662,20 @@ void BAHUDInstall(void) {
         gHUDLabel.userInteractionEnabled = YES;
         gHUDLabel.center = CGPointMake(UIScreen.mainScreen.bounds.size.width-90, 120);
         [gHUDWindow addSubview:gHUDLabel];
+        
         class_addMethod([UILabel class], NSSelectorFromString(@"ba_tap"),
             imp_implementationWithBlock(^(UILabel *v){ [[BAEngine shared] setPaused:![BAEngine shared].paused]; }), "v@:");
         [gHUDLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:gHUDLabel action:NSSelectorFromString(@"ba_tap")]];
         BAHUDRefresh();
+        BAHUDLog(@"HUD successfully created.");
     });
 }
 
 // ==================== Entry ====================
 %ctor {
     @autoreleasepool {
-        NSLog(@"[BadooAI] loaded");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        BAHUDLog(@"Tweak %ctor loaded into Badoo");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[BAConfig shared] reload];
             BAHUDInstall();
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
