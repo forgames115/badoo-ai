@@ -906,8 +906,8 @@ void BAHUDInstall(void) {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
         BAHUDLog(@"==== BadooAI ctor loaded into %@ (pid %d) ====", bid, getpid());
-        if (![bid isEqualToString:@"com.badoo.mobile"])
-            BAHUDLog(@"WARNING: bundle is %@ but filter expects com.badoo.mobile!", bid);
+        if (![bid isEqualToString:@"com.badoo.Badoo"])
+            BAHUDLog(@"WARNING: bundle is %@ — filter may not match!", bid);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             BAHUDInstall();
         });
