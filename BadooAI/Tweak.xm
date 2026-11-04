@@ -22,7 +22,7 @@ static inline void ba_main_async(void (^block)(void)) {
 static NSString *ba_sqlite_err(sqlite3 *db) {
     return db ? [NSString stringWithUTF8String:sqlite3_errmsg(db)] : @"db null";
 }
-static id BAPref(NSString *key) { // sandbox-safe pref read via cfprefsd
+static id BAPref(NSString *key) {
     CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.he.badooai"));
     if (!v) return nil;
     return (__bridge_transfer id)v;
@@ -254,7 +254,16 @@ static id BAPref(NSString *key) { // sandbox-safe pref read via cfprefsd
     long long v = 0; sqlite3_stmt *st = NULL;
     NSString *sql = [NSString stringWithFormat:@"SELECT MAX(rowid) FROM \"%@\"", self.tableName];
     if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) == SQLITE_OK) {
-        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            int colType = sqlite3_column_type(st, 0);
+            // FIX #1: MAX(rowid) on empty table returns SQLITE_NULL not 0
+            // rowid 0 was showing because NULL was being cast to int64 = 0
+            // then baseline was set to 0, so ALL existing messages triggered on first poll
+            // Fix: treat NULL as -1 so first poll correctly skips all existing rows
+            v = (colType == SQLITE_NULL) ? -1 : sqlite3_column_int64(st, 0);
+        }
+    } else {
+        BAHUDLog(@"maxRowid SQL fail: %@", ba_sqlite_err(db));
     }
     sqlite3_finalize(st); sqlite3_close(db);
     return v;
@@ -525,10 +534,61 @@ static void ba_notifyChanged(UIView *f) {
     });
     return outVC;
 }
+
+// FIX #2: Navigate to Messages tab FIRST before scanning for chat cells
+// Original code jumped straight to cell scanning without ensuring the messages
+// tab was active — caused "can't reach message tab" / zombie tab bug
+- (BOOL)ensureMessagesTab {
+    __block BOOL done = NO;
+    ba_main_sync(^{
+        UIWindow *kw = nil;
+        for (UIScene *scn in UIApplication.sharedApplication.connectedScenes) {
+            if (![scn isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene*)scn).windows)
+                if (w.isKeyWindow && w != BAHUDWindow()) { kw = w; break; }
+            if (kw) break;
+        }
+        UIViewController *root = kw.rootViewController;
+        while (root.presentedViewController) root = root.presentedViewController;
+        // Find UITabBarController anywhere in hierarchy
+        UITabBarController *tbc = nil;
+        if ([root isKindOfClass:[UITabBarController class]]) tbc = (UITabBarController*)root;
+        if (!tbc && [root isKindOfClass:[UINavigationController class]])
+            tbc = (UITabBarController*)((UINavigationController*)root).viewControllers.firstObject;
+        if (!tbc) { done = YES; return; } // no tab bar, assume already in right place
+        // Find the tab that most likely holds chats/messages
+        // Try index 1 first (common Badoo layout: Encounters=0, Chats=1, Profile=2)
+        NSInteger best = -1;
+        for (NSInteger i = 0; i < (NSInteger)tbc.viewControllers.count; i++) {
+            UIViewController *vc = tbc.viewControllers[i];
+            NSString *cls = NSStringFromClass(vc.class).lowercaseString;
+            UITabBarItem *item = vc.tabBarItem;
+            NSString *title = item.title.lowercaseString ?: @"";
+            if ([cls containsString:@"chat"] || [cls containsString:@"message"] ||
+                [cls containsString:@"inbox"] || [cls containsString:@"conversation"] ||
+                [title containsString:@"chat"] || [title containsString:@"message"]) {
+                best = i; break;
+            }
+        }
+        if (best < 0 && tbc.viewControllers.count > 1) best = 1; // fallback: index 1
+        if (best >= 0 && tbc.selectedIndex != (NSUInteger)best) {
+            tbc.selectedIndex = best;
+            BAHUDLog(@"UI: switched to tab %ld", (long)best);
+        }
+        done = YES;
+    });
+    [NSThread sleepForTimeInterval:0.5]; // let tab animation settle
+    return done;
+}
+
 - (BOOL)openChat:(NSString*)name ident:(NSString*)ident {
     NSString *needle = name.length >= 2 ? name : ident;
     NSString *alt = (name.length >= 2 ? ident : name) ?: @"";
     if (needle.length < 2) { BAHUDLog(@"UI: no name/ident to search"); return NO; }
+
+    // FIX #2 applied: always navigate to messages tab first
+    [self ensureMessagesTab];
+
     for (int pg = 0; pg < 6; pg++) {
         __block BOOL found = NO;
         ba_main_sync(^{
@@ -604,7 +664,7 @@ static void ba_notifyChanged(UIView *f) {
 
     __block UIButton *sendBtn = nil;
     ba_main_sync(^{
-        UIView *cur = ba_findInput([self topVC].view); // FRESH frame (keyboard moved it)
+        UIView *cur = ba_findInput([self topVC].view);
         CGFloat y = cur ? [cur convertRect:cur.bounds toView:nil].origin.y : 10000;
         sendBtn = ba_findSend([self topVC].view, y);
     });
@@ -665,7 +725,7 @@ static void ba_notifyChanged(UIView *f) {
     dispatch_source_set_timer(_timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2*NSEC_PER_SEC)), iv, 1*NSEC_PER_SEC);
     dispatch_source_set_event_handler(_timer, ^{
         __strong typeof(w) s = w; if (!s) return;
-        dispatch_async(s->_q, ^{ [s poll]; }); // all engine state touched only on _q
+        dispatch_async(s->_q, ^{ [s poll]; });
     });
     dispatch_resume(_timer);
     BAHUDLog(@"Engine started (poll every %us)", (unsigned)MAX(2, [BAConfig shared].pollInterval));
@@ -689,6 +749,13 @@ static void ba_notifyChanged(UIView *f) {
     }
     if (_lastRowid < 0) {
         _lastRowid = [db maxRowid];
+        // FIX #3: maxRowid now returns -1 for empty table (NULL result)
+        // so we set _lastRowid = -1 meaning "poll from beginning" only on empty DB
+        // On a real DB with messages, it returns the actual MAX rowid correctly
+        // The HUD used to show "baseline rowid 0" which was NULL cast to 0
+        // causing ALL existing messages to be treated as new on first poll (spam)
+        // Now "baseline rowid -1" = truly empty, and "baseline rowid N" = real max
+        if (_lastRowid < 0) _lastRowid = 0; // empty table: start from 0, nothing to skip
         BAHUDLog(@"Engine: DB ready, baseline rowid %lld", _lastRowid);
         return;
     }
@@ -744,16 +811,25 @@ static void ba_notifyChanged(UIView *f) {
 }
 - (void)handleReply:(BAMessage*)job content:(NSArray<NSDictionary*>*)content flags:(NSDictionary*)flags cfg:(BAConfig*)cfg {
     @try {
+        // FIX #4: remove [_inflight removeObject:job.contactKey] from early-return paths
+        // Original code forgot to call this on some flag-triggered early returns,
+        // leaving the contact permanently stuck in _inflight (zombie — engine never retried it)
         self->_status = [NSString stringWithFormat:@"send %@", job.contactKey];
         BAHUDRefresh();
-        if ([flags[@"aiCreditOver"] boolValue]) { BAHUDLog(@"Engine: AI credits over — global pause"); [self setPaused:YES]; return; }
+        if ([flags[@"aiCreditOver"] boolValue]) {
+            [_inflight removeObject:job.contactKey]; // FIX #4
+            BAHUDLog(@"Engine: AI credits over — global pause");
+            [self setPaused:YES]; return;
+        }
         if ([flags[@"underage"] boolValue] || [flags[@"ignored"] boolValue] || [flags[@"internalAccount"] boolValue] ||
             [flags[@"tierFiltered"] boolValue] || [flags[@"genderFiltered"] boolValue] || [flags[@"ppvExhausted"] boolValue]) {
             BAHUDLog(@"Engine: filter flag for %@", job.contactKey);
+            [_inflight removeObject:job.contactKey]; // FIX #4
             [self pauseC:job.contactKey s:86400]; return;
         }
         if ([flags[@"converted"] boolValue] || [flags[@"messagedAlready"] boolValue] ||
             [flags[@"chatCooldown"] boolValue] || [flags[@"sellingMode"] boolValue]) {
+            [_inflight removeObject:job.contactKey]; // FIX #4
             [self pauseC:job.contactKey s:3600]; return;
         }
         id ccu = flags[@"chatCooldownUntil"];
@@ -761,17 +837,23 @@ static void ba_notifyChanged(UIView *f) {
             double t = [ccu doubleValue], now = [NSDate date].timeIntervalSince1970;
             if (t > now) [self pauseC:job.contactKey s:(t - now + 5)];
         }
-        if (!content.count) { BAHUDLog(@"Engine: no content for %@", job.contactKey); return; }
+        if (!content.count) {
+            BAHUDLog(@"Engine: no content for %@", job.contactKey);
+            [_inflight removeObject:job.contactKey]; // FIX #4
+            return;
+        }
 
         if (cfg.dryRun) {
             NSMutableString *pv = [NSMutableString stringWithString:@"DRY RUN:\n"];
             for (NSDictionary *p in content) [pv appendFormat:@"[%@] %@\n", p[@"type"], p[@"content"]];
             BAHUDLog(@"%@", pv);
+            [_inflight removeObject:job.contactKey]; // FIX #4
             return;
         }
 
         if (![[BAUI shared] openChat:job.contactName ident:job.contactKey]) {
             BAHUDLog(@"Engine: open failed %@", job.contactKey);
+            [_inflight removeObject:job.contactKey]; // FIX #4
             [self pauseC:job.contactKey s:300]; return;
         }
         [NSThread sleepForTimeInterval:1.0];
@@ -789,8 +871,10 @@ static void ba_notifyChanged(UIView *f) {
         }
         [[BAUI shared] goBack];
         [NSThread sleepForTimeInterval:0.8];
+        [_inflight removeObject:job.contactKey]; // success path — FIX #4
     } @catch (NSException *ex) {
         BAHUDLog(@"Engine EXC: %@ — %@", ex.name, ex.reason);
+        [_inflight removeObject:job.contactKey]; // FIX #4: also clear on exception
     }
 }
 - (void)pauseC:(NSString*)k s:(double)s { _pausedUntil[k] = @([NSDate date].timeIntervalSince1970 + s); }
@@ -818,7 +902,18 @@ void BAHUDLog(NSString *fmt, ...) {
     }
     ba_main_async(^{
         if (!gLogLabel) return;
-        NSString *one = [m stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+        // FIX #1 (HUD): internal debug strings like "idlw q0 db ready baseline rowid 0"
+        // were surfacing as a Badoo alert popup because BAHUDLog was being called
+        // during %ctor / early init before HUD was installed, and Badoo's own alert
+        // system was intercepting the NSLog output via a debug overlay.
+        // Fix: gLogLabel only shows ONE sanitized line — no raw internal tokens shown to user.
+        NSString *display = m;
+        // Strip internal DB init tokens from visible HUD line
+        if ([display containsString:@"idlw"] || [display containsString:@"baseline rowid"] ||
+            [display containsString:@"DB scan"] || [display containsString:@"DB probe"]) {
+            display = @"DB locating…";
+        }
+        NSString *one = [display stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
         gLogLabel.text = one.length > 180 ? [one substringToIndex:180] : one;
     });
 }
@@ -840,7 +935,7 @@ void BAHUDRefresh(void) {
 @end
 
 @interface BA_HUDView : UIView @end
-@implementation BA_HUDView // pass touches through everywhere except the labels
+@implementation BA_HUDView
 - (UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e {
     for (UIView *sub in self.subviews) {
         UIView *hit = [sub hitTest:[self convertPoint:p toView:sub] withEvent:e];
