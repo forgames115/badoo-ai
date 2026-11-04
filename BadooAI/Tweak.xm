@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <stdlib.h>
 #import <stdarg.h>
 
 static UIWindow *gReconWindow = nil;
@@ -31,33 +32,35 @@ void RCDumpClassMap(void) {
     
     int numClasses = objc_getClassList(NULL, 0);
     Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-    numClasses = objc_getClassList(classes, numClasses);
-    
-    for (int i = 0; i < numClasses; i++) {
-        Class cls = classes[i];
-        const char *name = class_getName(cls);
-        if (!name) continue;
-        NSString *className = [NSString stringWithUTF8String:name];
+    if (classes) {
+        numClasses = objc_getClassList(classes, numClasses);
         
-        BOOL relevant = NO;
-        NSArray *kws = @[@"Chat", @"Message", @"Presence", @"User", @"Dialog", @"Socket", @"API", @"Network"];
-        for (NSString *kw in kws) {
-            if ([className rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                relevant = YES; break;
+        for (int i = 0; i < numClasses; i++) {
+            Class cls = classes[i];
+            const char *name = class_getName(cls);
+            if (!name) continue;
+            NSString *className = [NSString stringWithUTF8String:name];
+            
+            BOOL relevant = NO;
+            NSArray *kws = @[@"Chat", @"Message", @"Presence", @"User", @"Dialog", @"Socket", @"API", @"Network"];
+            for (NSString *kw in kws) {
+                if ([className rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    relevant = YES; break;
+                }
+            }
+            
+            if (relevant) {
+                [out appendFormat:@"\n## %@ : %@\n", className, class_getSuperclass(cls) ? [NSString stringWithUTF8String:class_getName(class_getSuperclass(cls))] : @"nil"];
+                unsigned int methodCount;
+                Method *methods = class_copyMethodList(cls, &methodCount);
+                for (int j = 0; j < methodCount; j++) {
+                    [out appendFormat:@"  -%s\n", sel_getName(method_getName(methods[j]))];
+                }
+                free(methods);
             }
         }
-        
-        if (relevant) {
-            [out appendFormat:@"\n## %@ : %@\n", className, class_getSuperclass(cls) ? [NSString stringWithUTF8String:class_getName(class_getSuperclass(cls))] : @"nil"];
-            unsigned int methodCount;
-            Method *methods = class_copyMethodList(cls, &methodCount);
-            for (int j = 0; j < methodCount; j++) {
-                [out appendFormat:@"  -%s\n", sel_getName(method_getName(methods[j]))];
-            }
-            free(methods);
-        }
+        free(classes);
     }
-    free(classes);
     [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
     RCLog(@"Dumped class map to %@", path);
 }
@@ -99,7 +102,7 @@ void RCDumpTopUI(void) {
 - (void)viewDidLoad { [super viewDidLoad]; self.view.backgroundColor = UIColor.clearColor; }
 @end
 
-static void ReconTap(void) {
+static void ReconTap(id self, SEL _cmd) {
     RCDumpTopUI();
     gReconLabel.text = @"DUMPED!";
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -119,13 +122,13 @@ void RCSetupHUD(void) {
             if ([s isKindOfClass:[UIWindowScene class]]) { activeScene = (UIWindowScene *)s; break; }
         }
     }
-    if (!activeScene) return;
+    if (!activeScene) { RCLog(@"No scene found for HUD"); return; }
     
     gReconWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
     gReconWindow.windowLevel = UIWindowLevelAlert + 1000;
     gReconWindow.backgroundColor = UIColor.clearColor;
     gReconWindow.rootViewController = [ReconVC new];
-    gReconWindow.hidden = NO;
+    [gReconWindow makeKeyAndVisible];
     
     gReconLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 100, 44)];
     gReconLabel.text = @"RECON";
